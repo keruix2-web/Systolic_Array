@@ -1,3 +1,5 @@
+Moved from the Georgia Tech repository and server for demonstration purposes on November 4, 2026.
+
 # Systolic Array
 
 A SystemVerilog implementation of a **4 × 4 weight-stationary systolic array** for matrix multiplication, developed as an ECE8804 team project.
