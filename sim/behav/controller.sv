@@ -1,0 +1,1 @@
+../../src/verilog/submodules/controller.sv

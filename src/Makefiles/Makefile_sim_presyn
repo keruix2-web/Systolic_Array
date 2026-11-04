@@ -1,0 +1,143 @@
+# ---------------------------------------------------------------------------
+# Milestone 1c: tiled memory-mode and external-core simulation (run from sim/behav)
+#
+#   make                 same as make vcs
+#   make vcs             link sources, build the C simulator, generate golden
+#                        data, compile tb_matrix_mult.include and run it with
+#                        assertions and coverage. Ends with TB RESULT: PASSED/FAILED
+#   make vcs TEST=rand_full_0         run one test from tests/tests.list
+#   make golden NUM_RANDOM=50 SEED=7  only regenerate the test vectors
+#   make cov_report      coverage report in urgReport/dashboard.html
+#   make verdi           open the last run's waveform (matrix_mult.fsdb)
+#   make external        core-only external-mode test (tb_matrix_mult_external)
+#   make wrapper TB=tb_matrix_mult_wrapper_bist   one wrapper-level test
+#   make regress         run every test above and print a PASS/FAIL summary
+#   make clean / wipe    remove simulation outputs / also remove linked sources and tests
+# ---------------------------------------------------------------------------
+TOPLEVEL    = tb_matrix_mult
+TESTNAME    = default
+SRC_VERILOG = ../../src/verilog
+SRC_FOLDER  = $(SRC_VERILOG)
+SIM_C_DIR   = ../../src/Simulator
+GEN_GOLDEN  = ../../scripts/gen_golden.py
+SIM=1
+SDF=0
+
+# Golden test generation and simulation options
+TEST_DIR    = tests
+NUM_RANDOM  = 10
+SEED        = 4804
+TEST        =
+COV_DIR     = $(TOPLEVEL).vdb
+COV_METRICS = line+cond+fsm+tgl+branch+assert
+SIM_ARGS    = +testdir=$(TEST_DIR) +testname=$(TESTNAME) $(if $(TEST),+test=$(TEST))
+
+#Build up a list of verilog define statements to be used by vcs
+VERILOG_DEFINES:=
+ifeq ($(SIM), 1)
+		VERILOG_DEFINES := $(VERILOG_DEFINES)+SIM=1
+endif
+ifeq ($(SDF), 1)
+		VERILOG_DEFINES := $(VERILOG_DEFINES)+SDF=1
+endif
+
+.DEFAULT_GOAL := vcs
+.PHONY: vcs verify compile golden simulator link_src cov_report verdi help clean wipe
+
+# Move all the verilog files from the source directory over to this simulation directory
+link_src:
+	find $(SRC_FOLDER) -name '*.include' -exec ln -s -f {} ';'
+	find $(SRC_FOLDER) -name '*.v' -exec ln -s -f {} ';'
+	find $(SRC_FOLDER) -name '*.sv' -exec ln -s -f {} ';'
+	find $(SRC_FOLDER) -name '*.svh' -exec ln -s -f {} ';'
+
+# Rebuild the C golden model on this machine. A sim.out built on another machine
+# can need a newer glibc than this one has
+simulator:
+	$(MAKE) -s -C $(SIM_C_DIR) clean all
+
+# The EDA setup puts other libpython builds on LD_LIBRARY_PATH, which breaks python3
+golden: simulator
+	env -u LD_LIBRARY_PATH python3 $(GEN_GOLDEN) --out $(TEST_DIR) --num-random $(NUM_RANDOM) --seed $(SEED)
+
+compile: link_src
+	vcs -top $(TOPLEVEL) -f $(TOPLEVEL).include +v2k +lint=all -sverilog -full64 \
+		-timescale=1ns/10ps -debug_acc+pp+dmptf -debug_region+cell+encrypt \
+		-debug_access -l $(TOPLEVEL)_compile.log +define+$(VERILOG_DEFINES) \
+		-cm $(COV_METRICS) -cm_dir $(COV_DIR) -lca -kdb -o simv
+
+vcs: golden compile
+	./simv -cm $(COV_METRICS) -cm_dir $(COV_DIR) -l $(TOPLEVEL).log $(SIM_ARGS)
+	@grep -E "TB RESULT" $(TOPLEVEL).log || true
+
+# Old name for the full flow
+verify: vcs
+
+cov_report:
+	urg -dir $(COV_DIR) -format both -report urgReport
+
+verdi:
+	verdi -ssf matrix_mult.fsdb -dbdir simv.daidir &
+
+help:
+	@sed -n '2,16p' $(firstword $(MAKEFILE_LIST))
+
+clean:
+	rm -rf DVEfiles
+	rm -rf *.log
+	rm -rf *.vpd
+	rm -rf *.fsdb
+	rm -rf ucli.key
+	rm -rf alib-52
+	rm -rf simv simv.daidir csrc
+	rm -rf simv_* *.vdb
+	rm -rf $(COV_DIR) urgReport
+	rm -rf verdiLog novas* vc_hdrs.h
+
+wipe: clean
+	rm -rf *.include
+	rm -rf *.sv *.v *.svh
+	rm -rf default.svf
+	rm -rf $(TEST_DIR)
+
+# Core-only external regression.
+.PHONY: external
+external:
+	$(MAKE) compile TOPLEVEL=tb_matrix_mult_external
+	./simv -cm $(COV_METRICS) -cm_dir tb_matrix_mult_external.vdb -l tb_matrix_mult_external.log
+
+# Wrapper-level tests: matrix_mult_wrapper_9 with all core and wrapper checkers bound.
+# Each test gets its own simv_<TB>, <TB>.vdb and <TB>.log so runs don't overwrite each other.
+WRAPPER_TBS = tb_matrix_mult_wrapper_external tb_matrix_mult_wrapper_registered \
+              tb_matrix_mult_wrapper_bist tb_matrix_mult_wrapper_full_bist
+TB          = tb_matrix_mult_wrapper_full_bist
+
+.PHONY: wrapper regress
+wrapper: link_src
+	rm -f $(TB).log
+	vcs -top $(TB) -f tb_matrix_mult_wrapper.include $(TB).sv +v2k +lint=all -sverilog -full64 \
+		-timescale=1ns/10ps -debug_acc+pp+dmptf -debug_region+cell+encrypt \
+		-debug_access -l $(TB)_compile.log +define+$(VERILOG_DEFINES) \
+		-cm $(COV_METRICS) -cm_dir $(TB).vdb -lca -kdb -o simv_$(TB)
+	./simv_$(TB) -cm $(COV_METRICS) -cm_dir $(TB).vdb -l $(TB).log
+
+# Full regression: memory mode (golden tests + directed tests), core external mode, then every
+# wrapper test. A failing test does not stop the others. A test counts as passed only if its log
+# has its PASSED line, so a compile error or crash shows up as FAIL.
+regress:
+	rm -f $(TOPLEVEL).log tb_matrix_mult_external.log $(addsuffix .log,$(WRAPPER_TBS))
+	-$(MAKE) vcs
+	-$(MAKE) external
+	-for tb in $(WRAPPER_TBS); do $(MAKE) wrapper TB=$$tb || true; done
+	@fail=0; \
+	check() { if [ -f "$$1.log" ] && grep -q "$$2" "$$1.log"; then echo "PASS  $$1"; \
+	          else echo "FAIL  $$1  (see $$1.log and $$1_compile.log)"; fail=1; fi; }; \
+	echo ""; echo "==================== REGRESSION SUMMARY ===================="; \
+	check $(TOPLEVEL)                     "TB RESULT: PASSED"; \
+	check tb_matrix_mult_external          "EXTERNAL CORE PASSED"; \
+	check tb_matrix_mult_wrapper_external  "WRAPPER DIRECT EXTERNAL PASSED"; \
+	check tb_matrix_mult_wrapper_registered "WRAPPER REGISTERED EXTERNAL PASSED"; \
+	check tb_matrix_mult_wrapper_bist      "WRAPPER BIST LOOPBACK PASSED"; \
+	check tb_matrix_mult_wrapper_full_bist "WRAPPER FULL BIST PASSED"; \
+	echo "============================================================"; \
+	if [ $$fail -eq 0 ]; then echo "REGRESSION: ALL PASSED"; else echo "REGRESSION: FAILED"; exit 1; fi

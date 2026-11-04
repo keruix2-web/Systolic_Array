@@ -1,0 +1,2 @@
+# Only needed for test_sim.py (the test harness). The C simulator has no Python dependencies.
+numpy>=1.17

@@ -1,0 +1,28 @@
+CC      := cc
+CFLAGS  := -std=c11 -O2 -Wall -Wextra -g
+LDFLAGS :=
+TARGET  := sim.out
+
+# Statically link when the system has the static C library so the binary contains every library it needs.
+# Otherwise (macOS, or Linux without glibc-static) fall back to linking only the system C library dynamically.
+STATIC_OK := $(shell echo 'int main(void){return 0;}' | $(CC) -static -x c - -o /dev/null 2>/dev/null && echo yes)
+ifeq ($(STATIC_OK),yes)
+LDFLAGS += -static
+endif
+
+SRCS := main.c config.c mem.c PE.c systolic.c
+OBJS := $(SRCS:.c=.o)
+HDRS := config.h mem.h PE.h systolic.h
+
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS)
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $(OBJS)
+
+%.o: %.c $(HDRS)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -f $(OBJS) $(TARGET)

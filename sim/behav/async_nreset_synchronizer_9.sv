@@ -1,0 +1,1 @@
+../../src/verilog/misc/async_nreset_synchronizer_9.sv

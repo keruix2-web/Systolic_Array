@@ -1,0 +1,1 @@
+../../src/verilog/verif/binds/wrapper_binds.sv

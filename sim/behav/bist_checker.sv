@@ -1,0 +1,1 @@
+../../src/verilog/verif/checkers/bist_checker.sv

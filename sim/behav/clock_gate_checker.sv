@@ -1,0 +1,1 @@
+../../src/verilog/verif/checkers/clock_gate_checker.sv

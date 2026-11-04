@@ -1,0 +1,1 @@
+../../src/verilog/verif/tb/tb_matrix_mult_wrapper_full_bist.sv

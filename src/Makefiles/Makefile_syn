@@ -1,0 +1,48 @@
+# TCL scripts
+TOPLEVEL=matrix_mult_wrapper_9
+PRJ=..
+
+SRC_VERILOG=$(PRJ)/src/verilog
+SRC_FOLDER= $(SRC_VERILOG)
+
+SRC_TCL=../src/syn
+TCL_MAIN=synthesis.tcl
+TMP_FOLDER=/tmp/$(USER)/
+
+# Directories
+RESULTDIR=./results 
+REPORTDIR=./reports
+
+design: 
+	-make clean
+	-make link_src
+	-make link_tcl
+	-make dc
+
+dc: results/$(TOPLEVEL).syn.v
+
+VERILOG_FILES:= $(wildcard $(SRC_VERILOG)/*.sv)
+TCL_FILES:= $(shell find $(SRC_TCL) -type f)
+
+link_src:
+	find $(SRC_FOLDER) -name '*.v' -exec ln -s -f {} ';'
+	find $(SRC_FOLDER) -name '*.sv' -exec ln -s -f {} ';'
+	find $(SRC_FOLDER) -name '*.svh' -exec ln -s -f {} ';'
+
+link_tcl:
+	find $(SRC_TCL) -name '*.tcl' -exec ln -s -f {} ';'
+
+results/$(TOPLEVEL).syn.v: $(VERILOG_FILES) $(TCL_FILES)
+	dc_shell -64bit -topo -output_log_file dc.log -f $(TCL_MAIN)
+
+clean:
+	-@ rm -rf $(TOPLEVEL)_lib \
+			  $(RESULTDIR) \
+			  $(REPORTDIR) \
+			  alib-52 \
+			  *.sv \
+			  *.svh \
+			  *.tcl \
+			  DC_lib\
+			  WORK \
+			  *.log

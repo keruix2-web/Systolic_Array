@@ -1,0 +1,75 @@
+# TCL scripts
+TOPLEVEL=matrix_mult_wrapper_9
+PRJ=..
+
+SRC_TCL=$(PRJ)/src/apr
+TCL_MAIN=apr.tcl
+
+SRC_VERILOG:= $(PRJ)/src/verilog/$(TOPLEVEL).sv $(PRJ)/src/verilog/$(TOPLEVEL)_pkg.sv
+SYN_FILES:= $(PRJ)/syn/results/$(TOPLEVEL).syn.v \
+			   $(PRJ)/syn/results/$(TOPLEVEL).sdc 	
+
+# Directories
+RESULTDIR=./results 
+REPORTDIR=./reports
+MACRODIR=../src/macro_prep
+SCRIPTDIR=../scripts
+4804TSMCDIR=/home/ece4804/tsmc
+NDMDIR=$(4804TSMCDIR)/65GP
+
+TCL_FILES:= $(shell find $(SRC_TCL) -type f)
+
+.PHONY = design, icc2, clean, wipe, link_tcl, link_syn
+
+design: 
+	-make clean
+	-make link_src
+	-make icc2
+
+
+icc2: results/$(TOPLEVEL).apr.v
+
+# $(SYN_FILES):$(SRC_VERILOG) 
+	# make -C $(PRJ)/syn
+	# echo "trying to synthesize"
+
+link_src:
+	find $(SRC_TCL) -name '*.txt' -exec ln -s -f {} ';'
+	find $(SRC_TCL) -name '*.tcl' -exec ln -s -f {} ';'
+	find $(SRC_TCL) -name '*.tpl' -exec ln -s -f {} ';'
+	find $(SCRIPTDIR) -name '*.py' -exec ln -s -f {} ';'
+	find $(PRJ)/syn/results/ -name '$(TOPLEVEL).*' -exec ln -s -f {} ';'
+	find $(4804TSMCDIR) -name '*.tcl' -exec ln -s -f {} ';'
+	mkdir ndm
+	ln -s $(NDMDIR) ./ndm
+
+
+results/$(TOPLEVEL).apr.v: $(TCL_FILES) $(SYN_FILES)
+	icc2_shell -output_log_file icc2.log -f $(TCL_MAIN)
+
+clean:
+	-@ rm -rf $(TOPLEVEL)_lib \
+			  $(RESULTDIR) \
+			  $(REPORTDIR) \
+			  alib-52 \
+			  *.sv \
+			  *.svh \
+			  *.tcl \
+			  *.tpl \
+			  *.py \
+			  *.txt \
+			  *.sdf \
+			  *.sdc \
+			  *.db \
+			  *.ddc \
+			  *.svf \
+			  DC_lib\
+			  *.syn.v\
+			  WORK \
+			  *.log \
+			  antenna.rule \
+			  net.acts \
+			  pna_output \
+			  default-* \
+			  ndm \
+			  work_dir 

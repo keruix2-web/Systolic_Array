@@ -1,0 +1,85 @@
+
+.PHONY: clean top
+
+
+TESTNAME=default_test
+SDF_ANNOTATE := 0
+EXTERNAL_DATA:=1
+DEBUG := 1
+SIM := 1
+BEHAV:=1
+
+VERILOG_DEFINES := 
+ifeq ($(SDF_ANNOTATE), 1)
+	VERILOG_DEFINES := $(VERILOG_DEFINES)+SDF_ANNOTATE=1
+endif
+ifeq ($(SIM), 1)
+	VERILOG_DEFINES := $(VERILOG_DEFINES)+SIM=1
+endif
+ifeq ($(EXTERNAL_DATA), 1)
+	VERILOG_DEFINES := $(VERILOG_DEFINES)+EXTERNAL_DATA=1
+endif
+ifeq ($(DEBUG), 1)
+	VERILOG_DEFINES := $(VERILOG_DEFINES)+DEBUG=1
+endif
+ifeq ($(BEHAV), 1)
+	VERILOG_DEFINES := $(VERILOG_DEFINES)+BEHAV=1
+endif
+
+# test routines
+#1. ro calib
+#2. sweep dac_code for hardware
+#3. sweep temperature
+
+#Functions
+#1. Read prng codes and record. Measure bias
+#2. Read trng codes and record. Measure bias. autocorr
+#3. Implement python code for multilevel von neumann
+
+
+# Emulator items
+# 1. i/o pads
+# 2. LFSR replaces trngv0 and trngv1
+
+#Sequence of important scan configurations to be run for the test. 
+#List of tests supported:
+# scan
+#   ext_clk_check
+#   ro_clk_check
+# prng_0_manual
+# prng_0_autotune
+# prng_1_manual
+# prng_1_autotune
+# trng_0_1_1: prng0, 1-level vonNeumann, 1 markov state
+# trng_0_1_3
+# trng_0_full
+# trng_1_full
+# trng_0_pulse
+# trng_power_meas
+
+test_run: 
+	scanSeqGen.py -c $(TESTNAME)_scanConfig.txt \
+	-o $(TESTNAME)_scan_result.txt -t scan_tasks.v -f x -q
+	make top TESTNAME=scan EXTERNAL_DATA=0 OUTPUTFILE=$(TESTNAME)_probe_out.txt VPDFILE=$(TESTNAME)_trng.vpd 
+
+top: 	
+	vcs -f trng_top.include \
+	+v2k -debug_pp +lint=IRIMW,NCEID,GCWM,CAWM,IGSFPG,TFIPC,IPDP,PCWM -sverilog -full64 +plusarg_save \
+	-timescale=1ns/10ps -l trng.log \
+	+testname=$(TESTNAME) \
+	+outputfile=$(OUTPUTFILE) \
+	+vpdfile=$(VPDFILE) \
+	+define$(VERILOG_DEFINES)  
+	simv +vpdfile+$(VPDFILE)
+
+clean:
+	-rm -rf simv.daidir\
+			  *.log\
+			  *~\
+			  csrc\
+			  ucli.key\
+			  simv\
+			  DVEfiles\
+			  dve_report*\
+			  *.vpd\
+			  *.vcd\
