@@ -30,6 +30,8 @@ The RTL is parameterized, but the implementation and post-APR results below are 
 | [`src/verilog/misc/`](src/verilog/misc/) | Reset synchronizer |
 | [`src/verilog/verif/`](src/verilog/verif/) | Testbenches, tasks, assertion checkers, binds, common packages, and filelists |
 
+The original `apr/`, `syn/`, `sim/`, `img/`, `src/Makefiles/`, `src/Simulator/`, `src/apr/`, and `src/syn/` directory structure is retained with `.gitkeep` placeholders; their previous contents are omitted.
+
 Source filenames omit the group suffix; design module names retain `_9`, including `matrix_mult_9` and `matrix_mult_wrapper_9`.
 
 This repository contains **RTL, verification sources, filelists, SDF selection configurations, and this README**. It excludes the C reference simulator, vector-generation scripts, Makefiles, synthesis/APR Tcl, technology libraries, netlists, SDF files, and generated results. The results below describe runs performed in the full project environment, rather than artifacts packaged in this export.
