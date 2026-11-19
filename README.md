@@ -1,6 +1,6 @@
 # INT8 Systolic Array
 
-A SystemVerilog RTL and verification snapshot of a **4 × 4 weight-stationary systolic array**, developed as a Georgia Tech ECE8804 team project. This export was updated from the local team working folder on November 18, 2026.
+A SystemVerilog RTL and verification snapshot of a **4 × 4 weight-stationary systolic array**. This export was updated from the local team working folder on November 18, 2026.
 
 ## Architecture
 
