@@ -12,9 +12,13 @@
      and the current weight is modified if write_weight_i goes high.
      write_weight_i should only ever go high if load_weight_i is high,
      otherwise a partial sum will be written to the weight
+
+     en_i is the clock enable for east_o and south_o. It must be high on every
+     cycle this PE loads weights or does a valid MAC. When it is low the outputs
+     hold, so synthesis can replace the enable with a clock gate
 *******************************************************************************/
 
-module PE 
+module PE_9
     #(
         parameter   ACT_WIDTH=8,
         parameter   WEIGHT_WIDTH=8,
@@ -26,6 +30,7 @@ module PE
     (
         input logic                                         clk_i,
         input logic                                         rstn_i,
+        input logic                                         en_i,
         input logic                                         load_weight_i,
         input logic                                         write_weight_i,
         input logic signed      [ACT_WIDTH-1:0]             west_i,
@@ -53,11 +58,12 @@ module PE
     end
 
     // Flip-flop to change the output on the positive edge of the clock
+    // Only update when enabled so these registers can be clock gated
     always_ff @(posedge clk_i) begin
         if(!rstn_i) begin
             east_o <= '0;
             south_o <= '0;
-        end else begin
+        end else if(en_i) begin
             east_o <= east_next_r;
             south_o <= south_next_r;
         end

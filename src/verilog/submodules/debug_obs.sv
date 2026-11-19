@@ -4,7 +4,7 @@
 	Observes 
 *******************************************************************************/
 
-module debug_obs
+module debug_obs_9
     import matrix_mult_pkg::*;
     import controller_fsm_pkg::*;
     #(

@@ -1,12 +1,12 @@
 /******************************************************************************
- Module Name : systolic_array
+ Module Name : controller
  Description :
 	This controller drives the signals that control the systolic array PEs
     and the memory reads and writes. It coordinates timing so that tiled
     matrix multiplication is complete for the given input data configuration. 
 *******************************************************************************/
 
-module controller
+module controller_9
     import matrix_mult_pkg::*;          // To access data config structure to get the input row size
     import controller_fsm_pkg::*;       // Structure where fsm states are delcared
     #(
@@ -74,24 +74,36 @@ module controller
     logic [$clog2(MAX_ROW/Tk)-1:0] k_last_w;
     logic [$clog2(MAX_COL/Tn)-1:0] n_last_w;
 
-    // Create counters to track progress through tiling
+    // The next tile's weights are loaded while the last tile is still draining, so the read side
+    // (weight/activation reads, driven by the FSM) and the write side (partial sum reads and writes,
+    // driven by psum_valid_i) can be working on different tiles. Each side keeps its own tile counters.
+
+    // Read side counters to track progress through tiling
     logic [$clog2(MAX_ROW/Tk)-1:0] k_count_r;
     logic [$clog2(MAX_COL/Tn)-1:0] n_count_r;
 
+    // Write side counters (the tile whose outputs are currently being written)
+    logic [$clog2(MAX_ROW/Tk)-1:0] wr_k_count_r;
+    logic [$clog2(MAX_COL/Tn)-1:0] wr_n_count_r;
+
     // Create variables to keep track of the memory offsets due to tiling
     // Using these counters that are incremented on a cyclical basis is cheaper than multiplying to calculate memory address
+    // The weight and input offsets belong to the read side, the partial sum offset to the write side
     logic [$clog2(W_SIZE)-1:0] w_tile_offset_r;
     logic [$clog2(I_SIZE)-1:0] i_tile_offset_r;
     logic [$clog2(O_SIZE)-1:0] p_tile_offset_r;
 
-    // Create a combinational signal to indicate when a tile has finished
-    logic tile_done_w;
+    // Create combinational signals to indicate when a tile has finished on each side
+    // rd_tile_done_w: the last input row of the tile is read (last STREAM cycle)
+    // wr_tile_done_w: the last output row of the tile is written
+    logic rd_tile_done_w, wr_tile_done_w;
 
-    // Create combinational signals to detect when we have reached the final n or k tile
+    // Create combinational signals to detect when we have reached the final n or k tile on each side
     logic last_k_w, last_n_w;
+    logic wr_last_k_w, wr_last_n_w;
 
     // Create a signal to detect when the first k tile is being written
-    logic first_k_w;
+    logic wr_first_k_w;
 
     // Create a wire to hold the address of the psum output
     logic [$clog2(O_SIZE)-1:0] psum_addr_w;
@@ -102,6 +114,11 @@ module controller
 
     // Detect a rising edge of the start signal by keeping track of the previous start signal
     logic start_previous_r, start_pulse_w;
+
+    // Coarse clock enable for the counters and tile offsets. In IDLE and DONE they only need the
+    // first cycle (to clear for the next run), so they are gated for the rest of the wait.
+    // state_r, start_previous_r and idle_done_q_r stay ungated so a start edge can wake the controller
+    logic idle_done_w, idle_done_q_r, ctrl_en_w;
 
     always_ff @(posedge clk_i) 
         // Setting start_previous to start_i on reset prevents a bug where, if start is held high during
@@ -120,63 +137,83 @@ module controller
     // Set the last_k_w and last_n_w flag based on if our counters indicate we are on the last tile in that dimension
     assign last_k_w = k_last_w == k_count_r;
     assign last_n_w = n_last_w == n_count_r;
+    assign wr_last_k_w = k_last_w == wr_k_count_r;
+    assign wr_last_n_w = n_last_w == wr_n_count_r;
 
-    // Set the first_k_w flag based on if the k counter is at 0
-    assign first_k_w = k_count_r == 0;
+    // Set the first k flag based on if the write side k counter is at 0
+    assign wr_first_k_w = wr_k_count_r == 0;
 
-    // Assign the output signals based on first and last k internal registers
-    assign first_k_o = first_k_w;
-    assign last_k_o = last_k_w;
+    // first_k_o and last_k_o select the accumulate input and the 16/8-bit output in matrix_mult,
+    // so they follow the tile being written, not the tile being read
+    assign first_k_o = wr_first_k_w;
+    assign last_k_o = wr_last_k_w;
+
+    // A tile is done reading on its last STREAM cycle
+    assign rd_tile_done_w = (state_r == STREAM) && (rd_count_r == data_config_i.i_rows-1);
+    // A tile is done writing on the cycle after its last psum_valid_i, which is the cycle of the last
+    // delayed write. The write side counters change after this cycle, so the last row still uses them
+    assign wr_tile_done_w = (wr_count_r == data_config_i.i_rows);
 
     // Always statement to register state changes
     always_ff @(posedge clk_i)
         if(!rstn_i)     state_r <= IDLE;
         else            state_r <= next_state_w;
 
+    // Remember if last cycle was IDLE or DONE so the counters are enabled on the first waiting cycle only
+    // Every counter is 0 after that cycle, and the only update a start edge causes (rd_count_r clearing)
+    // is already a no-op, so gating them for the rest of IDLE/DONE does not change their values
+    assign idle_done_w = (state_r == IDLE) || (state_r == DONE);
+    always_ff @(posedge clk_i)
+        if(!rstn_i)     idle_done_q_r <= 1'b0;
+        else            idle_done_q_r <= idle_done_w;
+    assign ctrl_en_w = !idle_done_w || !idle_done_q_r;
+
     // Always statement for next state combinational logic and calculation work
     always_comb begin
         // By default, make the next state statex to make debugging easier
         next_state_w = STATEX;
 
-        // By default, set the tile done signal to 0
-        tile_done_w = 1'b0;
-
         case(state_r)
             IDLE: begin
                 // Begin only on a positive edge of start
                 // Start with weight loading
-                if(start_pulse_w)                           next_state_w = LOAD_WEIGHT;
-                else                                        next_state_w = IDLE;
+                if(start_pulse_w)                                   next_state_w = LOAD_WEIGHT;
+                else                                                next_state_w = IDLE;
             end
             LOAD_WEIGHT: begin
                 // Continue loading weights until every row of the systolic array has been loaded
-                if(rd_count_r == Tk-1)                      next_state_w = STREAM;
-                else                                        next_state_w = LOAD_WEIGHT;
+                if(rd_count_r == Tk-1)                              next_state_w = STREAM;
+                else                                                next_state_w = LOAD_WEIGHT;
             end
             STREAM: begin
-                // Once we have read all the rows in the input matrix, we will start generating output
-                if(rd_count_r == data_config_i.i_rows-1)    next_state_w = DRAIN;
-                else                                        next_state_w = STREAM;
+                // Once we have read all the rows in the input matrix, this tile is done reading
+                if(rd_tile_done_w) begin
+                    // After the last tile, wait for its outputs to be written
+                    if(last_k_w && last_n_w)                        next_state_w = FINAL_DRAIN;
+                    // Otherwise wait for the top row to finish before loading the next weights.
+                    // With a single column there is nothing to wait for
+                    else if(Tn > 1)                                 next_state_w = GAP;
+                    else                                            next_state_w = LOAD_WEIGHT;
+                end else                                            next_state_w = STREAM;
             end
-            DRAIN: begin
-                // Once we have written the same number of rows as in the activation matrix, we are done with this tile
-                // Delay one cycle past this because accumulation takes 2 cycles (read partial sum memory & accumulate/write back)
-                if(wr_count_r == data_config_i.i_rows) begin
-                    // If this was the last tile in both tiling dimensions, we have finished
-                    if(last_k_w && last_n_w)                    next_state_w = DONE;
-                    // Otherwise we need to continue tiling by loading new weights
-                    else                                    next_state_w = LOAD_WEIGHT;
-                    // Indicate we have finished with a tile so the tile counters can be updated
-                    tile_done_w = 1'b1;
-                end else                                    next_state_w = DRAIN;
-
+            GAP: begin
+                // Wait Tn-1 cycles (rd_count_r 0 to Tn-2) so the next weights enter row 0 right after
+                // PE(0,Tn-1) does its last MAC. Each weight then reaches row i the cycle after row i
+                // finishes, and every PE has finished by the time write_weight_o rises
+                if(rd_count_r == Tn-2)                              next_state_w = LOAD_WEIGHT;
+                else                                                next_state_w = GAP;
+            end
+            FINAL_DRAIN: begin
+                // Once the last row of the last tile has been written, we have finished
+                if(wr_tile_done_w && wr_last_k_w && wr_last_n_w)    next_state_w = DONE;
+                else                                                next_state_w = FINAL_DRAIN;
             end
             DONE: begin
                 // Keep the done signal high (stay in done) until we start again or the system is reset
-                if(start_pulse_w)                           next_state_w = LOAD_WEIGHT;
-                else                                        next_state_w = DONE;
+                if(start_pulse_w)                                   next_state_w = LOAD_WEIGHT;
+                else                                                next_state_w = DONE;
             end
-            default:                                        next_state_w = STATEX;
+            default:                                                next_state_w = STATEX;
         endcase
     end
 
@@ -187,14 +224,18 @@ module controller
             wr_count_r <= '0;
             n_count_r <= '0;
             k_count_r <= '0;
-        end else begin
+            wr_n_count_r <= '0;
+            wr_k_count_r <= '0;
+        end else if(ctrl_en_w) begin
             // The read counter restarts every time the state changes
             if(next_state_w != state_r)                             rd_count_r <= '0;
-            // In weight loading and streaming, a read occurs every cycle
-            else if(state_r == LOAD_WEIGHT || state_r == STREAM)    rd_count_r <= rd_count_r + 1'b1;
+            // In weight loading and streaming, a read occurs every cycle. In GAP it counts the wait cycles
+            else if(state_r == LOAD_WEIGHT || state_r == STREAM || state_r == GAP)
+                                                                    rd_count_r <= rd_count_r + 1'b1;
 
-            // The write counter clears between each matrix multiplication tile run (which begins with weight loading)
-            if(state_r == LOAD_WEIGHT)                              wr_count_r <= '0;
+            // The write counter clears after the last row of each tile is written. It can't clear in
+            // LOAD_WEIGHT because the last tile may still be writing while the next tile loads weights
+            if(wr_tile_done_w)                                      wr_count_r <= '0;
             // A write occurs every time the psum valid signal is high
             else if(psum_valid_i)                                   wr_count_r <= wr_count_r + 1'b1;
 
@@ -202,14 +243,25 @@ module controller
             if(state_r == IDLE || state_r == DONE) begin
                                                                     n_count_r <= '0;
                                                                     k_count_r <= '0;
-            // Only increment tile counts when a tile has finished
-            end else if(tile_done_w) begin
-                // If this is the last k, reset k and increment n
-                if(last_k_w) begin
+                                                                    wr_n_count_r <= '0;
+                                                                    wr_k_count_r <= '0;
+            end else begin
+                // Only increment the read side tile counts when a tile has finished reading
+                if(rd_tile_done_w) begin
+                    // If this is the last k, reset k and increment n
+                    if(last_k_w) begin
                                                                     k_count_r <= '0;
                                                                     n_count_r <= n_count_r + 1'b1;
+                    end else                                        k_count_r <= k_count_r + 1'b1;
+                end
 
-                end else                                            k_count_r <= k_count_r + 1'b1;
+                // Same for the write side when a tile has finished writing
+                if(wr_tile_done_w) begin
+                    if(wr_last_k_w) begin
+                                                                    wr_k_count_r <= '0;
+                                                                    wr_n_count_r <= wr_n_count_r + 1'b1;
+                    end else                                        wr_k_count_r <= wr_k_count_r + 1'b1;
+                end
             end
         end
     end
@@ -220,23 +272,27 @@ module controller
             w_tile_offset_r <= '0;
             i_tile_offset_r <= '0;
             p_tile_offset_r <= '0;
-        end else begin
+        end else if(ctrl_en_w) begin
             // Every time the matrix multiplication operation restarts, reset the memory offsets to 0
             if(state_r == IDLE || state_r == DONE) begin
                 w_tile_offset_r <= '0;
                 i_tile_offset_r <= '0;
                 p_tile_offset_r <= '0;
-            // Otherwise, only update when a tile finishes
-            end else if(tile_done_w) begin
-                // Increment the weight offset every tile by the number of weights rows used last tile (Tk)
-                w_tile_offset_r <= w_tile_offset_r + Tk;
-                // On the last k, reset the i offset and increment the output (p) offset
-                if(last_k_w)  begin
-                    i_tile_offset_r <= '0;
-                    // Increment by the number of output rows written for the last tile
-                    p_tile_offset_r <= p_tile_offset_r + data_config_i.i_rows;
-                // Otherwise, increment by the number of input rows read for the last tile
-                end else    i_tile_offset_r <= i_tile_offset_r + data_config_i.i_rows;
+            end else begin
+                // The read offsets only update when a tile finishes reading
+                if(rd_tile_done_w) begin
+                    // Increment the weight offset every tile by the number of weights rows used last tile (Tk)
+                    w_tile_offset_r <= w_tile_offset_r + Tk;
+                    // On the last k, reset the i offset
+                    if(last_k_w)    i_tile_offset_r <= '0;
+                    // Otherwise, increment by the number of input rows read for the last tile
+                    else            i_tile_offset_r <= i_tile_offset_r + data_config_i.i_rows;
+                end
+
+                // The output (p) offset only updates when a tile finishes writing, on the last k
+                // Increment by the number of output rows written for the last tile
+                if(wr_tile_done_w && wr_last_k_w)
+                                    p_tile_offset_r <= p_tile_offset_r + data_config_i.i_rows;
             end
         end
     end
@@ -276,7 +332,7 @@ module controller
             write_weight_o  <= 1'b0;
             act_valid_o     <= 1'b0;
         end else begin
-            // The load weight signal tells the PE to pas the weights to the next PE
+            // The load weight signal tells the PE to pass the weights to the next PE
             load_weight_o   <= (state_r == LOAD_WEIGHT);
             // On the last weight load cycle, write all of the weights to the PEs
             write_weight_o  <= (state_r == LOAD_WEIGHT) && (rd_count_r == Tk - 1);
@@ -288,19 +344,20 @@ module controller
     // Constantly drive the output read write enable bar port high because we don't write to the read port
     // Read the partial sum address if this is not the first k tile
     assign ob_mem_wenb_R_o = 1'b1;
-    assign ob_mem_cenb_R_o = ~(psum_valid_i & ~first_k_w);
+    assign ob_mem_cenb_R_o = ~(psum_valid_i & ~wr_first_k_w);
     // Save the write address to a wire that can also be used for the write output
     assign psum_addr_w = data_config_i.psum_offset + p_tile_offset_r + wr_count_r;
     assign ob_mem_addr_R_o = psum_addr_w;
 
     // Create the output write signals a clock cycle after the read signals
+    // The address only matters on a write, so only capture it with a valid partial sum (clock gated)
     always_ff @(posedge clk_i) begin
         if(!rstn_i) begin
             psum_valid_delayed_r <= 1'b0;
             psum_addr_delayed_r <= '0;
         end else begin
             psum_valid_delayed_r <= psum_valid_i;
-            psum_addr_delayed_r <= psum_addr_w;
+            if(psum_valid_i)    psum_addr_delayed_r <= psum_addr_w;
         end
     end
     assign ob_mem_cenb_W_o = ~psum_valid_delayed_r;
@@ -308,8 +365,9 @@ module controller
     assign ob_mem_addr_W_o = psum_addr_delayed_r;
     assign psum_valid_delayed_o = psum_valid_delayed_r;
 
-    // Raise the done signal high while we are in the done state
-    assign done_o = (state_r == DONE);
+    // Raise the done signal high while we are waiting for a start edge (IDLE after reset, DONE after a run)
+    // so done is high out of reset and stays high until the next start
+    assign done_o = (state_r == IDLE) || (state_r == DONE);
 
     // Connect internal register values to outputs for debug add-on
     assign state_o = state_r;
@@ -317,6 +375,8 @@ module controller
     assign wr_count_o = wr_count_r;
     assign k_count_o = k_count_r;
     assign n_count_o = n_count_r;
-    assign start_pulse_o = start_pulse_w;
+    // Only report start edges while the controller is out of reset (start_pulse_w is combinational,
+    // so it would still pulse in external/BiST mode where the controller is held in reset)
+    assign start_pulse_o = start_pulse_w && rstn_i;
     
 endmodule

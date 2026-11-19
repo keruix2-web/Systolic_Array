@@ -1,1 +1,0 @@
-../../src/verilog/verif/checkers/controller_checker.sv

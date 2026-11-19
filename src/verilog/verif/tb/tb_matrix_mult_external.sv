@@ -94,6 +94,24 @@ module tb_matrix_mult_external;
         tick(2);
         reset_core();
         run_tile(0,4,0);
+        // A start edge in external mode is not a memory-mode start: it must not clear the debug
+        // counters (page 6 = input rows) or set "start edge seen" (page 0 bit 6).
+        begin
+            logic [7:0] in_rows;
+            data_config_i.extra_config_i={3'd6,1'b0};
+            tick();
+            in_rows=extra_output_bits_o.extra_config_o;
+            start_i=0;
+            tick();
+            start_i=1;
+            tick(2);
+            a_ext_start_keeps_counts: assert(in_rows==8'd4 && extra_output_bits_o.extra_config_o==in_rows)
+                else `SVA_FAIL("a start edge in external mode cleared the debug input row count")
+            data_config_i.extra_config_i={3'd0,1'b0};
+            tick();
+            a_ext_start_not_seen: assert(!extra_output_bits_o.extra_config_o[6])
+                else `SVA_FAIL("a start edge in external mode set the debug start-seen flag")
+        end
         // Returning idle with start held high must not launch a memory run.
         ext_en_i=0;
         tick(4);

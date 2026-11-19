@@ -1,1 +1,0 @@
-../../src/verilog/verif/checkers/external_controller_checker.sv

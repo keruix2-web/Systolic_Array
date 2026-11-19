@@ -23,7 +23,7 @@ bind matrix_mult_9 matrix_mult_checker #(
     .O_SIZE             (O_SIZE)
 ) u_matrix_mult_checker (.rstn_i(mem_rstn), .*);
 
-bind controller controller_checker #(
+bind controller_9 controller_checker #(
     .Tn                 (Tn),
     .Tk                 (Tk),
     .W_SIZE             (W_SIZE),
@@ -31,36 +31,36 @@ bind controller controller_checker #(
     .O_SIZE             (O_SIZE)
 ) u_controller_checker (.*);
 
-bind systolic_array systolic_array_checker #(
+bind systolic_array_9 systolic_array_checker #(
     .INPUT_WIDTH        (INPUT_WIDTH),
     .ARRAY_W            (ARRAY_W),
     .ARRAY_H            (ARRAY_H),
     .ACCUM_WIDTH        (ACCUM_WIDTH)
 ) u_systolic_array_checker (.*);
 
-bind PE PE_checker #(
+bind PE_9 PE_checker #(
     .ACT_WIDTH          (ACT_WIDTH),
     .WEIGHT_WIDTH       (WEIGHT_WIDTH),
     .INTERNAL_SUM_WIDTH (INTERNAL_SUM_WIDTH)
 ) u_PE_checker (.*);
 
-bind shift_buffer shift_buffer_checker #(
+bind shift_buffer_9 shift_buffer_checker #(
     .DATA_WIDTH         (DATA_WIDTH),
     .BUFFER_LENGTH      (BUFFER_LENGTH)
 ) u_shift_buffer_checker (.*);
 
-bind saturate saturate_checker #(
+bind saturate_9 saturate_checker #(
     .INPUT_WIDTH        (INPUT_WIDTH),
     .OUTPUT_WIDTH       (OUTPUT_WIDTH)
 ) u_saturate_checker (.*);
 
-bind external_controller external_controller_checker #(.Tk(Tk))
+bind external_controller_9 external_controller_checker #(.Tk(Tk))
     u_external_controller_checker (.*);
 bind matrix_mult_9 matrix_mult_external_checker #(
     .WIDTH(WIDTH), .Tm(Tm), .Tn(Tn), .Tk(Tk)
 ) u_matrix_mult_external_checker (.*);
 
-bind debug_obs debug_obs_checker #(
+bind debug_obs_9 debug_obs_checker #(
     .WIDTH              (WIDTH),
     .Tn                 (Tn),
     .Tk                 (Tk)

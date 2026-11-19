@@ -6,7 +6,7 @@
  before loading new weights or changing ext_en_i; reset aborts an operation.
  ext_psum is unused, as in the TA reference model.
 ******************************************************************************/
-module external_controller #(
+module external_controller_9 #(
     parameter Tk = 4
 ) (
     input  logic clk_i,

@@ -4,7 +4,7 @@
 	 
 *******************************************************************************/
 
-module systolic_array
+module systolic_array_9
     #(
         parameter INPUT_WIDTH=8,
         parameter ARRAY_W=4,
@@ -39,19 +39,86 @@ module systolic_array
     // Internal weight outputs for debug purposes
     logic [ARRAY_H-1:0][ARRAY_W-1:0][INPUT_WIDTH-1:0] internal_weight_r;
 
+    // Per-row load weight signal. Row i is put in weight pass-through mode i cycles after row 0,
+    // the same cycle the first weight reaches it. This lets the top rows start loading the next
+    // tile's weights while the lower rows are still finishing the last partial sums of this tile.
+    // write_weight_i stays global: on that cycle every row has the load signal high.
+    logic [ARRAY_H-1:0] load_row_w;
+
+    // Activation valid pipeline. act_valid_d_w[d] is act_valid_i from d cycles ago. A row that enters
+    // with act_valid_i is at PE(i,j) when act_valid_d_w[i+j] is high, so these taps are the clock
+    // enables for the PEs and shift buffers. The last tap is psum_valid_o
+    localparam VALID_DEPTH = ARRAY_H + ARRAY_W - 1;
+    logic [VALID_DEPTH:0] act_valid_d_w;
+    logic [VALID_DEPTH:1] act_valid_d_r;
+
+    // Clock enables. A PE is enabled while its row loads weights or a valid row is passing through it.
+    // A shift buffer is enabled while a valid row is entering or inside it
+    logic [ARRAY_H-1:0][ARRAY_W-1:0] pe_en_w;
+    logic [ARRAY_H-1:0] in_buf_en_w;
+    logic [ARRAY_W-1:0] out_buf_en_w;
+
+    generate
+        if(ARRAY_H == 1) begin : load_no_delay
+            assign load_row_w = load_weight_i;
+        end else begin : load_delay
+            // load_delay_r[i-1] holds load_weight_i from i cycles ago
+            logic [ARRAY_H-2:0] load_delay_r;
+            // Only shift while a load bit is in the delay line so it is gated outside weight loading
+            // | operator ors all values in load_row_w so if any row is valid, the shift register is active
+            always_ff @(posedge clk_i) begin
+                if(!rstn_i)             load_delay_r <= '0;
+                else if(|load_row_w)    load_delay_r <= load_row_w[ARRAY_H-2:0];
+            end
+            assign load_row_w = {load_delay_r, load_weight_i};
+        end
+    endgenerate
+
+    // Only shift while a valid bit is in the pipeline so it is gated when the array is idle
+    always_ff @(posedge clk_i) begin
+        if(!rstn_i)             act_valid_d_r <= '0;
+        else if(|act_valid_d_w) act_valid_d_r <= act_valid_d_w[VALID_DEPTH-1:0];
+    end
+    assign act_valid_d_w = {act_valid_d_r, act_valid_i};
+    assign psum_valid_o = act_valid_d_r[VALID_DEPTH];
+
+    always_comb begin
+        // PE(i,j) is enabled when its row is preforming weight loading or it is processing valid data
+        for(int i=0; i < ARRAY_H; i++)
+            for(int j=0; j < ARRAY_W; j++)
+                pe_en_w[i][j] = load_row_w[i] || act_valid_d_w[i+j];
+
+        // Input buffer i (length i) holds a row from when it enters (tap 0) until it leaves (tap i-1)
+        for(int i=0; i < ARRAY_H; i++) begin
+            in_buf_en_w[i] = 1'b0;
+            for(int d=0; d < i; d++)
+                in_buf_en_w[i] = in_buf_en_w[i] || act_valid_d_w[d];
+        end
+
+        // Output buffer j (length ARRAY_W-1-j) takes the bottom PE output one cycle after that PE
+        // computes (tap ARRAY_H+j) and shifts it until the row is on psum_o (tap VALID_DEPTH-1)
+        for(int j=0; j < ARRAY_W; j++) begin
+            out_buf_en_w[j] = 1'b0;
+            for(int d=ARRAY_H+j; d < VALID_DEPTH; d++)
+                out_buf_en_w[j] = out_buf_en_w[j] || act_valid_d_w[d];
+        end
+    end
+
     // Set the activations to 0 when the input is not valid
+    // The buffers no longer need this for correctness, but it stops act_i toggling the row 0 MACs
     assign gated_act_r = act_valid_i ? act_i : '0;
 
     // Create the input buffers
     generate
         for(genvar i=0; i < ARRAY_H; i++) begin : input_buffers
-            shift_buffer
+            shift_buffer_9
             #(
                 .DATA_WIDTH     (INPUT_WIDTH),
                 .BUFFER_LENGTH  (i)                 // Buffer lower rows longer to stagger inputs
             ) input_shift (
                 .clk_i          (clk_i),
                 .rstn_i         (rstn_i),
+                .en_i           (in_buf_en_w[i]),
                 .data_i         (gated_act_r[i][INPUT_WIDTH-1:0]),
                 .data_o         (buffered_act_r[i][INPUT_WIDTH-1:0])
             );
@@ -61,30 +128,19 @@ module systolic_array
     // Create the output data buffers
     generate
         for(genvar j=0; j < ARRAY_W; j++) begin : output_buffers
-            shift_buffer 
+            shift_buffer_9
             #(
                 .DATA_WIDTH     (ACCUM_WIDTH),
                 .BUFFER_LENGTH  (ARRAY_W-1-j)                   // Earlier columns need to be buffered longer because they generate data sooner
             ) output_shift (
                 .clk_i          (clk_i),
                 .rstn_i         (rstn_i),
+                .en_i           (out_buf_en_w[j]),
                 .data_i         (internal_psum_r[ARRAY_H][j][ACCUM_WIDTH-1:0]),
                 .data_o         (psum_o[j][ACCUM_WIDTH-1:0])
             );
         end
     endgenerate
-
-    // Create a buffer to output the valid signal with the same latency as the output becomes valid
-    shift_buffer
-    #(
-        .DATA_WIDTH     (1),
-        .BUFFER_LENGTH  (ARRAY_H + ARRAY_W - 1)
-    ) valid_shift (
-        .clk_i          (clk_i),
-        .rstn_i         (rstn_i),
-        .data_i         (act_valid_i),
-        .data_o         (psum_valid_o)
-    );
 
     // Set the first column of internal activations to the buffered activations
     generate
@@ -106,7 +162,7 @@ module systolic_array
     generate
         for(genvar i=0; i < ARRAY_H; i++) begin
             for(genvar j=0; j < ARRAY_W; j++) begin : systolic
-                PE
+                PE_9
                 #(
                     .ACT_WIDTH              (INPUT_WIDTH),
                     .WEIGHT_WIDTH           (INPUT_WIDTH),
@@ -114,7 +170,8 @@ module systolic_array
                 ) mac (
                     .clk_i          (clk_i),
                     .rstn_i         (rstn_i),
-                    .load_weight_i  (load_weight_i),
+                    .en_i           (pe_en_w[i][j]),
+                    .load_weight_i  (load_row_w[i]),
                     .write_weight_i (write_weight_i),
                     .west_i         (internal_act_r[i][j][INPUT_WIDTH-1:0]),
                     .north_i        (internal_psum_r[i][j][ACCUM_WIDTH-1:0]),

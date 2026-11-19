@@ -7,13 +7,14 @@ module tb_matrix_mult;
    parameter N             = 4;
    parameter K             = 4;
 
-   // Tiling / Hardware Tile Parameters
-   parameter Tm            = 4;            // Hardware array tile rows
-   parameter Tn            = 4;            // Hardware array tile cols
-   parameter Tk            = 4;            // Hardware tile K depth
+   // Tiling / Hardware Tile Parameters (taken from matrix_mult_pkg, so changing ROW/COL there
+   // resizes the testbench too)
+   parameter Tm            = matrix_mult_pkg::ROW;   // Hardware array tile rows
+   parameter Tn            = matrix_mult_pkg::COL;   // Hardware array tile cols
+   parameter Tk            = matrix_mult_pkg::ROW;   // Hardware tile K depth
 
    // Matrix Mult parameters
-   parameter WIDTH         = 8;            // datawidth
+   parameter WIDTH         = matrix_mult_pkg::WIDTH; // datawidth
    parameter ACCUM_WIDTH   = 16;           // accumulator width (output/psum memory)
    parameter ROW           = Tm;           // systolic array # of rows (mapped to Tm)
    parameter COL           = Tn;           // systolic array # of cols (mapped to Tn)
@@ -97,7 +98,7 @@ module tb_matrix_mult;
    end
 
    // -- Memory Instance: Input Buffer Memory -- //
-   mem_emulator #(.WIDTH(Tm*WIDTH), .SIZE(I_SIZE))
+   mem_emulator_9 #(.WIDTH(Tm*WIDTH), .SIZE(I_SIZE))
       ib_mem (
          .clk_i   (clk_i),
          .cenb_i  (ib_mem_cenb_o),
@@ -108,7 +109,7 @@ module tb_matrix_mult;
    );
 
    // -- Memory Instance: Weight Buffer Memory -- //
-   mem_emulator #(.WIDTH(Tn*WIDTH), .SIZE(W_SIZE))
+   mem_emulator_9 #(.WIDTH(Tn*WIDTH), .SIZE(W_SIZE))
       wb_mem (
          .clk_i   (clk_i),
          .cenb_i  (wb_mem_cenb_o),
@@ -119,7 +120,7 @@ module tb_matrix_mult;
    );
 
    // -- Memory Instance: Output Buffer Memory -- //
-   mem2p_emulator #(.WIDTH(Tn*ACCUM_WIDTH), .SIZE(O_SIZE))
+   mem2p_emulator_9 #(.WIDTH(Tn*ACCUM_WIDTH), .SIZE(O_SIZE))
       ob_mem (
          .clk_i    (clk_i),
          .cenb_a_i (ob_mem_cenb_R_o),

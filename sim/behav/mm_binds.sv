@@ -1,1 +1,0 @@
-../../src/verilog/verif/binds/mm_binds.sv

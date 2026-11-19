@@ -5,20 +5,27 @@
      instance in mm_binds.sv, so it can see state_r, start_pulse_w and
      wr_count_r.
 
-     The checker keeps its own K/N tile indices (ref_k, ref_n: N outer loop,
-     K inner loop) and computes the expected tile base addresses with
-     multiplies, independent of the controller's offset registers.
+     The checker keeps its own K/N tile indices (N outer loop, K inner loop)
+     and computes the expected tile base addresses with multiplies,
+     independent of the controller's offset registers. The next tile's
+     weights load while the last tile drains, so there are two sets:
+     ref_k/ref_n for the tile being read (advance on the last STREAM cycle)
+     and ref_wk/ref_wn for the tile being written (advance on the last
+     output row write).
 
      Checks:
        - start_pulse_w fires only on a true rising edge of start_i
        - Only legal FSM transitions occur
-       - LOAD_WEIGHT lasts exactly Tk cycles, STREAM exactly i_rows cycles
-       - DRAIN ends when the last row of the tile is written, then goes to
-         LOAD_WEIGHT for the next tile or to DONE after the last tile
+       - LOAD_WEIGHT lasts exactly Tk cycles, STREAM exactly i_rows cycles,
+         GAP exactly Tn-1 cycles
+       - STREAM goes to GAP (then LOAD_WEIGHT) for the next tile, or to
+         FINAL_DRAIN after the last tile
+       - FINAL_DRAIN ends when the last row of the last tile is written
+       - The read side is never more than one tile ahead of the write side
        - Weight rows are read Tk-1 down to 0, input rows 0 up to i_rows-1
          (relative to the tile base address), and only in their own state
        - Array controls line up with the 1-cycle memory read latency
-       - first_k_o / last_k_o match the current K tile
+       - first_k_o / last_k_o match the K tile being written
        - Partial sums are read (R port) for every row except on the first K
          tile, and each row is written (W port) one cycle after psum_valid_i
          to the same address
@@ -87,48 +94,67 @@ module controller_checker
 
     // ---------------------------------------------------------------- Reference tile model
     int unsigned k_tiles, n_tiles;      // tiles in each dimension for the current configuration
-    int unsigned ref_k, ref_n;          // current tile (N outer loop, K inner loop)
-    int unsigned psum_rd_idx;           // psum_valid_i rows seen in the current tile
+    int unsigned ref_k, ref_n;          // tile being read (N outer loop, K inner loop)
+    int unsigned ref_wk, ref_wn;        // tile being written
+    int unsigned psum_rd_idx;           // psum_valid_i rows seen in the tile being written
+    int unsigned stream_cycles;         // cycles spent in STREAM during the current visit
+    logic        rd_end;                // last input row of the tile is read this cycle
     logic        tile_end;              // last row of the tile is written this cycle
-    logic        ref_last_k, ref_last_n;
+    logic        ref_last_k, ref_last_n, ref_w_last_k, ref_w_last_n;
     logic        busy_state;
 
-    assign k_tiles    = data_config_i.w_rows / Tk;
-    assign n_tiles    = data_config_i.w_cols / Tn;
-    assign ref_last_k = (ref_k == k_tiles - 1);
-    assign ref_last_n = (ref_n == n_tiles - 1);
-    assign tile_end   = (state_r == DRAIN) && (wr_count_r == data_config_i.i_rows);
-    assign busy_state = state_r inside {LOAD_WEIGHT, STREAM, DRAIN};
+    assign k_tiles      = data_config_i.w_rows / Tk;
+    assign n_tiles      = data_config_i.w_cols / Tn;
+    assign ref_last_k   = (ref_k == k_tiles - 1);
+    assign ref_last_n   = (ref_n == n_tiles - 1);
+    assign ref_w_last_k = (ref_wk == k_tiles - 1);
+    assign ref_w_last_n = (ref_wn == n_tiles - 1);
+    assign rd_end       = (state_r == STREAM) && (stream_cycles == data_config_i.i_rows - 1);
+    assign tile_end     = (psum_rd_idx == data_config_i.i_rows);
+    assign busy_state   = state_r inside {LOAD_WEIGHT, STREAM, GAP, FINAL_DRAIN};
 
     always_ff @(posedge clk_i) begin
         if (!rstn_i || !busy_state) begin
-            ref_k <= 0;
-            ref_n <= 0;
-        end else if (tile_end) begin
-            if (ref_last_k) begin
-                ref_k <= 0;
-                ref_n <= ref_n + 1;
-            end else begin
-                ref_k <= ref_k + 1;
+            ref_k  <= 0;
+            ref_n  <= 0;
+            ref_wk <= 0;
+            ref_wn <= 0;
+        end else begin
+            if (rd_end) begin
+                if (ref_last_k) begin
+                    ref_k <= 0;
+                    ref_n <= ref_n + 1;
+                end else begin
+                    ref_k <= ref_k + 1;
+                end
+            end
+            if (tile_end) begin
+                if (ref_w_last_k) begin
+                    ref_wk <= 0;
+                    ref_wn <= ref_wn + 1;
+                end else begin
+                    ref_wk <= ref_wk + 1;
+                end
             end
         end
 
-        if (!rstn_i || state_r == LOAD_WEIGHT)  psum_rd_idx <= 0;
-        else if (psum_valid_i)                  psum_rd_idx <= psum_rd_idx + 1;
+        if (!rstn_i || tile_end)    psum_rd_idx <= 0;
+        else if (psum_valid_i)      psum_rd_idx <= psum_rd_idx + 1;
+
+        if (!rstn_i || state_r != STREAM)   stream_cycles <= 0;
+        else                                stream_cycles <= stream_cycles + 1;
     end
 
     // Expected base address of the current tile in each memory (words)
     int unsigned w_base, i_base, p_base;
     assign w_base = data_config_i.w_offset    + (ref_n * k_tiles + ref_k) * Tk;
     assign i_base = data_config_i.i_offset    + ref_k * data_config_i.i_rows;
-    assign p_base = data_config_i.psum_offset + ref_n * data_config_i.i_rows;
+    assign p_base = data_config_i.psum_offset + ref_wn * data_config_i.i_rows;
 
-    // Cycles spent in STREAM during the current visit
-    int unsigned stream_cycles;
-    always_ff @(posedge clk_i) begin
-        if (!rstn_i || state_r != STREAM)   stream_cycles <= 0;
-        else                                stream_cycles <= stream_cycles + 1;
-    end
+    // Linear tile indices, to check how far the read side runs ahead of the write side
+    int unsigned rd_tile, wr_tile;
+    assign rd_tile = ref_n  * k_tiles + ref_k;
+    assign wr_tile = ref_wn * k_tiles + ref_wk;
 
     default clocking cb @(posedge clk_i); endclocking
     default disable iff (!rstn_i);
@@ -138,7 +164,7 @@ module controller_checker
         else `SVA_FAIL("start_pulse_w is not exactly the rising edge of start_i")
 
     // ---------------------------------------------------------------- FSM
-    a_state_legal: assert property (!$isunknown(state_r) && state_r inside {IDLE, LOAD_WEIGHT, STREAM, DRAIN, DONE})
+    a_state_legal: assert property (!$isunknown(state_r) && state_r inside {IDLE, LOAD_WEIGHT, STREAM, GAP, FINAL_DRAIN, DONE})
         else `SVA_FAIL("controller state_r is X or not a legal state")
 
     a_idle_start: assert property (state_r == IDLE && start_pulse_w |=> state_r == LOAD_WEIGHT)
@@ -149,27 +175,38 @@ module controller_checker
     a_load_len: assert property ($rose(state_r == LOAD_WEIGHT) |-> (state_r == LOAD_WEIGHT)[*Tk] ##1 state_r == STREAM)
         else `SVA_FAIL("LOAD_WEIGHT did not last exactly Tk cycles before STREAM")
 
-    a_stream_next: assert property (state_r == STREAM |=> state_r inside {STREAM, DRAIN})
-        else `SVA_FAIL("illegal transition out of STREAM")
+    a_stream_hold: assert property (state_r == STREAM && !rd_end |=> state_r == STREAM)
+        else `SVA_FAIL("STREAM ended before the last input row was read")
     a_stream_len: assert property ($fell(state_r == STREAM) |-> stream_cycles == data_config_i.i_rows)
         else `SVA_FAIL("STREAM did not last exactly i_rows cycles")
+    a_stream_next_tile: assert property (rd_end && !(ref_last_k && ref_last_n) |=> state_r == ((Tn > 1) ? GAP : LOAD_WEIGHT))
+        else `SVA_FAIL("STREAM did not go to GAP (or LOAD_WEIGHT when Tn == 1) for the next tile")
+    a_stream_last_tile: assert property (rd_end && ref_last_k && ref_last_n |=> state_r == FINAL_DRAIN)
+        else `SVA_FAIL("STREAM did not go to FINAL_DRAIN after the last tile")
 
-    a_drain_next: assert property (state_r == DRAIN |=> state_r inside {DRAIN, LOAD_WEIGHT, DONE})
-        else `SVA_FAIL("illegal transition out of DRAIN")
-    a_drain_hold: assert property (state_r == DRAIN && !tile_end |=> state_r == DRAIN)
-        else `SVA_FAIL("DRAIN ended before the last row of the tile was written")
-    a_drain_next_tile: assert property (tile_end && !(ref_last_k && ref_last_n) |=> state_r == LOAD_WEIGHT)
-        else `SVA_FAIL("DRAIN did not go to LOAD_WEIGHT for the next tile")
-    a_drain_done: assert property (tile_end && ref_last_k && ref_last_n |=> state_r == DONE)
-        else `SVA_FAIL("DRAIN did not go to DONE after the last tile")
+    // GAP lets the top row finish its last MAC before the next weights enter it
+    a_gap_len: assert property ($rose(state_r == GAP) |-> (state_r == GAP)[*Tn-1] ##1 state_r == LOAD_WEIGHT)
+        else `SVA_FAIL("GAP did not last exactly Tn-1 cycles before LOAD_WEIGHT")
+
+    a_final_next: assert property (state_r == FINAL_DRAIN |=> state_r inside {FINAL_DRAIN, DONE})
+        else `SVA_FAIL("illegal transition out of FINAL_DRAIN")
+    a_final_hold: assert property (state_r == FINAL_DRAIN && !tile_end |=> state_r == FINAL_DRAIN)
+        else `SVA_FAIL("FINAL_DRAIN ended before the last row of the last tile was written")
+    a_final_done: assert property (state_r == FINAL_DRAIN && tile_end && ref_w_last_k && ref_w_last_n |=> state_r == DONE)
+        else `SVA_FAIL("FINAL_DRAIN did not go to DONE after the last row of the last tile was written")
+
+    // The read side may start the next tile before the last one is written, but never two tiles ahead
+    a_rd_ahead: assert property (busy_state |-> rd_tile == wr_tile || rd_tile == wr_tile + 1)
+        else `SVA_FAIL("read side tile is not equal to or one ahead of the write side tile")
 
     a_done_restart: assert property (state_r == DONE && start_pulse_w |=> state_r == LOAD_WEIGHT)
         else `SVA_FAIL("DONE did not restart on a start edge")
     a_done_hold: assert property (state_r == DONE && !start_pulse_w |=> state_r == DONE)
         else `SVA_FAIL("DONE left without a start edge")
 
-    a_done_o: assert property (done_o == (state_r == DONE))
-        else `SVA_FAIL("done_o does not match state_r == DONE")
+    // done_o is high whenever the FSM waits for a start edge: IDLE (after reset) and DONE
+    a_done_o: assert property (done_o == (state_r inside {IDLE, DONE}))
+        else `SVA_FAIL("done_o does not match state_r == IDLE or DONE")
 
     // ---------------------------------------------------------------- Memory reads
     a_mem_read_only: assert property (wb_mem_wenb_o && ib_mem_wenb_o)
@@ -201,29 +238,29 @@ module controller_checker
         else `SVA_FAIL("write_weight_o is not a single pulse inside load_weight_o")
 
     // ---------------------------------------------------------------- Output writes
-    a_psum_window: assert property (psum_valid_i |-> state_r inside {STREAM, DRAIN})
-        else `SVA_FAIL("psum_valid_i outside of STREAM/DRAIN")
+    a_psum_window: assert property (psum_valid_i |-> busy_state)
+        else `SVA_FAIL("psum_valid_i outside of a run")
     a_ob_write_enable: assert property (ob_mem_cenb_W_o == ob_mem_wenb_W_o && ob_mem_cenb_W_o == !$past(psum_valid_i))
         else `SVA_FAIL("output write enables are not psum_valid_i delayed by one cycle")
     a_ob_R_read_only: assert property (ob_mem_wenb_R_o)
         else `SVA_FAIL("controller drove a write through the output memory read (R) port")
-    a_ob_R_enable: assert property (!ob_mem_cenb_R_o == (psum_valid_i && ref_k != 0))
+    a_ob_R_enable: assert property (!ob_mem_cenb_R_o == (psum_valid_i && ref_wk != 0))
         else `SVA_FAIL("partial sum read enable is not psum_valid_i on a K tile after the first")
     a_ob_R_addr: assert property (!ob_mem_cenb_R_o |-> ob_mem_addr_R_o == O_AW'(p_base + psum_rd_idx))
         else `SVA_FAIL("partial sum read address is not psum_offset + n*i_rows + row")
     a_ob_RW_same_addr: assert property (psum_valid_i |=> !ob_mem_cenb_W_o && ob_mem_addr_W_o == O_AW'($past(p_base + psum_rd_idx)))
         else `SVA_FAIL("output row was not written one cycle after psum_valid_i to the address that was read")
-    // wr_count_r keeps its last value in DONE until the next LOAD_WEIGHT, so only check it in a tile
-    a_wr_count_bound: assert property (state_r inside {STREAM, DRAIN} |-> wr_count_r <= data_config_i.i_rows)
-        else `SVA_FAIL("wr_count_r exceeded i_rows")
-    a_tile_end_write: assert property (tile_end |-> !ob_mem_cenb_W_o && psum_rd_idx == data_config_i.i_rows)
-        else `SVA_FAIL("DRAIN ended on a cycle that was not the last row write of the tile")
+    // wr_count_r counts the rows of the tile being written and clears after its last row
+    a_wr_count: assert property (busy_state |-> wr_count_r == psum_rd_idx)
+        else `SVA_FAIL("wr_count_r does not match the rows written in the current tile")
+    a_tile_end_write: assert property (tile_end && busy_state |-> !ob_mem_cenb_W_o)
+        else `SVA_FAIL("the last row of a tile was not written on the cycle the tile ended")
 
     // first_k_o / last_k_o select the accumulate input and the 16/8-bit output in matrix_mult
-    a_first_k: assert property (busy_state |-> first_k_o == (ref_k == 0))
-        else `SVA_FAIL("first_k_o does not match the current K tile")
-    a_last_k: assert property (busy_state |-> last_k_o == ref_last_k)
-        else `SVA_FAIL("last_k_o does not match the current K tile")
+    a_first_k: assert property (busy_state |-> first_k_o == (ref_wk == 0))
+        else `SVA_FAIL("first_k_o does not match the K tile being written")
+    a_last_k: assert property (busy_state |-> last_k_o == ref_w_last_k)
+        else `SVA_FAIL("last_k_o does not match the K tile being written")
 
     // ---------------------------------------------------------------- Coverage
     covergroup cg_fsm @(posedge clk_i iff rstn_i);
@@ -231,7 +268,8 @@ module controller_checker
             bins idle   = {IDLE};
             bins load   = {LOAD_WEIGHT};
             bins stream = {STREAM};
-            bins drain  = {DRAIN};
+            bins gap    = {GAP};
+            bins final_drain = {FINAL_DRAIN};
             bins done   = {DONE};
         }
         cp_trans: coverpoint state_r {
@@ -240,10 +278,12 @@ module controller_checker
             bins load_hold      = (LOAD_WEIGHT => LOAD_WEIGHT);
             bins load_to_stream = (LOAD_WEIGHT => STREAM);
             bins stream_hold    = (STREAM => STREAM);
-            bins stream_to_drain= (STREAM => DRAIN);
-            bins drain_hold     = (DRAIN => DRAIN);
-            bins drain_to_load  = (DRAIN => LOAD_WEIGHT);
-            bins drain_to_done  = (DRAIN => DONE);
+            bins stream_to_gap  = (STREAM => GAP);
+            bins stream_to_final= (STREAM => FINAL_DRAIN);
+            bins gap_hold       = (GAP => GAP);
+            bins gap_to_load    = (GAP => LOAD_WEIGHT);
+            bins final_hold     = (FINAL_DRAIN => FINAL_DRAIN);
+            bins final_to_done  = (FINAL_DRAIN => DONE);
             bins done_hold      = (DONE => DONE);
             bins done_to_load   = (DONE => LOAD_WEIGHT);
             bins full_run       = (IDLE => LOAD_WEIGHT [* Tk] => STREAM);
@@ -256,7 +296,8 @@ module controller_checker
             bins idle   = {IDLE};
             bins load   = {LOAD_WEIGHT};
             bins stream = {STREAM};
-            bins drain  = {DRAIN};
+            bins gap    = {GAP};
+            bins final_drain = {FINAL_DRAIN};
             bins done   = {DONE};
         }
     endgroup

@@ -10,7 +10,7 @@
 ./systolic_array.sv
 ./external_controller.sv
 ./controller.sv
-./matrix_mult_9.sv
+./matrix_mult.sv
 ./PE_checker.sv
 ./shift_buffer_checker.sv
 ./saturate_checker.sv

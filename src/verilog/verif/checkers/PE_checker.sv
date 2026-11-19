@@ -5,9 +5,11 @@
      mm_binds.sv, so it can see the internal weight register.
 
      Checks:
-       - east_o is west_i delayed by one cycle
-       - weight loading passes north_i straight to south_o
-       - MAC mode computes south_o = weight * west_i + north_i with no overflow
+       - when enabled, east_o is west_i delayed by one cycle
+       - when enabled, weight loading passes north_i straight to south_o
+       - when enabled, MAC mode computes south_o = weight * west_i + north_i with no overflow
+       - when not enabled (clock gated), east_o and south_o hold
+       - loading always has the PE enabled
        - weight only changes on write_weight_i, and only while loading
      Coverage:
        - weight x activation corner values for the MACs this PE performs
@@ -24,6 +26,7 @@ module PE_checker
     (
         input logic                                 clk_i,
         input logic                                 rstn_i,
+        input logic                                 en_i,
         input logic                                 load_weight_i,
         input logic                                 write_weight_i,
         input logic signed [ACT_WIDTH-1:0]          west_i,
@@ -49,17 +52,24 @@ module PE_checker
     default disable iff (!rstn_i);
 
     // ---------------------------------------------------------------- Assertions
-    a_east_pass: assert property (1'b1 |=> east_o == $past(west_i))
+    a_east_pass: assert property (en_i |=> east_o == $past(west_i))
         else `SVA_FAIL("PE east_o is not west_i delayed by one cycle")
 
-    a_load_pass: assert property (load_weight_i |=> south_o == $past(north_i))
+    a_load_pass: assert property (en_i && load_weight_i |=> south_o == $past(north_i))
         else `SVA_FAIL("PE did not pass north_i to south_o while loading weights")
 
-    a_mac: assert property (!load_weight_i |=> longint'(south_o) == $past(mac_full))
+    a_mac: assert property (en_i && !load_weight_i |=> longint'(south_o) == $past(mac_full))
         else `SVA_FAIL("PE south_o != weight_r * west_i + north_i")
 
-    a_no_overflow: assert property (!load_weight_i |-> (mac_full >= SUM_MIN && mac_full <= SUM_MAX))
+    // Inputs can be stale while the PE is gated, so only check overflow on MACs that are captured
+    a_no_overflow: assert property (en_i && !load_weight_i |-> (mac_full >= SUM_MIN && mac_full <= SUM_MAX))
         else `SVA_FAIL("PE MAC result overflows INTERNAL_SUM_WIDTH")
+
+    a_gated_hold: assert property (!en_i |=> east_o == $past(east_o) && south_o == $past(south_o))
+        else `SVA_FAIL("PE east_o or south_o changed while the PE was not enabled")
+
+    a_load_needs_en: assert property (load_weight_i |-> en_i)
+        else `SVA_FAIL("PE load_weight_i asserted while the PE was not enabled")
 
     a_weight_write: assert property (write_weight_i |=> weight_r == $past(north_i[WEIGHT_WIDTH-1:0]))
         else `SVA_FAIL("PE weight_r was not captured from north_i on write_weight_i")
@@ -70,14 +80,14 @@ module PE_checker
     a_write_needs_load: assert property (write_weight_i |-> load_weight_i)
         else `SVA_FAIL("PE write_weight_i asserted without load_weight_i")
 
-    a_known: assert property (!$isunknown({load_weight_i, write_weight_i, east_o, south_o, weight_r}))
+    a_known: assert property (!$isunknown({en_i, load_weight_i, write_weight_i, east_o, south_o, weight_r}))
         else `SVA_FAIL("PE control, output or weight is X/Z")
 
     // ---------------------------------------------------------------- Coverage
     c_weight_written: cover property (write_weight_i);
 
-    // Sample every MAC cycle (not during weight loading)
-    covergroup cg_mac @(posedge clk_i iff (rstn_i && !load_weight_i));
+    // Sample every MAC cycle that is captured (enabled and not loading weights)
+    covergroup cg_mac @(posedge clk_i iff (rstn_i && en_i && !load_weight_i));
         option.per_instance = 1;
         cp_weight: coverpoint weight_r {
             bins min  = {W_MIN};

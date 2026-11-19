@@ -1,1 +1,0 @@
-../../src/verilog/submodules/external_controller.sv

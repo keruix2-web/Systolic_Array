@@ -69,6 +69,7 @@ int     last_errors;            // errors from the most recent run_memory_test
 int     last_latency;           // start edge to done_o, in cycles, from the most recent run_memory_test
 bit     ref_sat16, ref_sat8;    // the current test saturates a 16-bit partial sum / an 8-bit output
 bit     debug_sweep = 1'b0;     // step extra_config_i every cycle (debug add-on test)
+bit     ran_since_reset = 1'b0; // a run has finished since the last reset (done_o is also high after reset)
 
 // Golden output image (16-bit lanes like the output memory, tiled layout) and SV reference result for the current test
 logic [Tn*ACCUM_WIDTH-1:0]  golden_mem [MAX_O_WORDS];
@@ -154,7 +155,7 @@ function automatic int num_tiles(int n, int k);
     return (k / Tk) * (n / Tn);
 endfunction
 
-// Each tile is LOAD_WEIGHT (Tk) + STREAM (m) + DRAIN (about Tm + Tn); allow 4x that
+// Each tile is at most LOAD_WEIGHT (Tk) + STREAM (m) + drain (about Tm + Tn); allow 4x that
 function automatic int timeout_cycles(int m, int n, int k);
     return 4 * num_tiles(n, k) * (Tk + m + Tm + Tn) + 100;
 endfunction
@@ -184,6 +185,7 @@ task automatic reset_dut(input int cycles = 5);
     start_i = 1'b0;
     repeat (cycles) @(negedge clk_i);
     rst_n   = 1'b1;
+    ran_since_reset = 1'b0;
     @(negedge clk_i);
 endtask
 
@@ -349,7 +351,7 @@ task automatic run_memory_test(input test_t t,
     bit     from_done;
 
     if (do_reset) reset_dut();
-    from_done = done_o;
+    from_done = done_o && ran_since_reset;
 
     load_test(t, i_off, w_off);
     configure(t.m, t.n, t.k, i_off, w_off, p_off);
@@ -390,6 +392,7 @@ task automatic run_memory_test(input test_t t,
     check_results(t, p_off, check_errors);
     errors += check_errors;
 
+    ran_since_reset = 1'b1;
     last_errors  = errors;
     last_latency = latency;
     report_test(tag, t, errors, latency);
@@ -397,8 +400,8 @@ task automatic run_memory_test(input test_t t,
 endtask
 
 // ---------------------------------------------------------------- Directed tests
-// Reset the DUT at every cycle of a run. After each reset done_o must be low and stay low
-// (the assertions also check that the memories stay idle). Then a clean run must still pass.
+// Reset the DUT at every cycle of a run. After each reset done_o must be high (IDLE) and stay
+// high with the memories idle until a new start edge. Then a clean run must still pass.
 task automatic reset_sweep(input test_t t);
     int errors = 0;
     int run_len;
@@ -418,17 +421,18 @@ task automatic reset_sweep(input test_t t);
 
         rst_n = 1'b0;
         repeat (2) @(negedge clk_i);
-        if (done_o) begin
+        if (!done_o) begin
             errors++;
-            $error("[reset_sweep] done_o high during reset (reset %0d cycles into the run)", d);
+            $error("[reset_sweep] done_o low during reset (reset %0d cycles into the run)", d);
         end
         rst_n = 1'b1;
+        ran_since_reset = 1'b0;
 
         for (int c = 0; c < run_len + 10; c++) begin
             @(negedge clk_i);
-            if (done_o) begin
+            if (!done_o || !ib_mem_cenb_o || !wb_mem_cenb_o) begin
                 errors++;
-                $error("[reset_sweep] done_o rose after reset with no new start edge (reset %0d cycles into the run)", d);
+                $error("[reset_sweep] DUT left IDLE after reset with no new start edge (reset %0d cycles into the run)", d);
                 break;
             end
         end
@@ -451,10 +455,12 @@ task automatic start_high_through_reset(input test_t t);
     configure(t.m, t.n, t.k, 0, 0, 0);
     repeat (5) @(negedge clk_i);
     rst_n = 1'b1;
+    ran_since_reset = 1'b0;
 
+    // done_o stays high in IDLE, so a start shows up as done_o dropping or a memory read
     for (int c = 0; c < timeout_cycles(t.m, t.n, t.k); c++) begin
         @(negedge clk_i);
-        if (done_o || !ib_mem_cenb_o || !wb_mem_cenb_o) begin
+        if (!done_o || !ib_mem_cenb_o || !wb_mem_cenb_o) begin
             errors++;
             $error("[start_high_through_reset] DUT started without a rising edge on start_i (start_i was already high at reset release)");
             break;
@@ -463,8 +469,12 @@ task automatic start_high_through_reset(input test_t t);
     report_test($sformatf("start_high_through_reset (%s)", t.name), t, errors, 0);
 
     // If the DUT did start, let that run finish so the next start edge does not land mid-run
-    if (errors != 0)
-        for (int c = 0; c < timeout_cycles(t.m, t.n, t.k) && !done_o; c++) @(negedge clk_i);
+    if (errors != 0) begin
+        test_t  t_wait = t;
+        int     wait_cycles;
+        bit     wait_timed_out;
+        wait_for_done(t_wait, wait_cycles, wait_timed_out);
+    end
 
     @(negedge clk_i);
     start_i = 1'b0;
@@ -493,10 +503,12 @@ task automatic check_page(input string tag, input int sel, input logic [7:0] exp
     end
 endtask
 
-// Pages after a reset: everything is 0 except last_k on page 3, which follows data_config_i
+// Pages after a reset: everything is 0 except done_o on page 0 (high in IDLE) and last_k on
+// page 3, which follows data_config_i
 task automatic check_debug_cleared(input string tag, input test_t t, inout int errors);
     for (int p = 0; p < 8; p++)
-        check_page(tag, p, (p == 3) ? {t.k == Tk, 7'd0} : 8'h00, errors);
+        check_page(tag, p, (p == 0) ? {5'b00001, 3'(controller_fsm_pkg::IDLE)} :
+                           (p == 3) ? {t.k == Tk, 7'd0} : 8'h00, errors);
 endtask
 
 // Pages in DONE after a run of t (weights loaded from w_off = 0)
@@ -512,10 +524,11 @@ task automatic check_debug_after_run(input string tag, input test_t t, inout int
     // Status: start seen, done, state DONE. With fp_en set it is echoed in bit 5
     check_page(tag, 0, {1'b0, 1'b1, 1'b0, 1'b0, 1'b1, 3'(controller_fsm_pkg::DONE)}, errors);
     check_page(tag, 0, {1'b0, 1'b1, 1'b1, 1'b0, 1'b1, 3'(controller_fsm_pkg::DONE)}, errors, 1'b1);
-    // The tile and read counters are cleared in DONE, the write counter holds i_rows
+    // The tile, read and write counters are cleared in DONE (the write counter clears after
+    // the last row of each tile is written)
     check_page(tag, 1, 8'h00, errors);
     check_page(tag, 2, 8'h00, errors);
-    check_page(tag, 3, {t.k == Tk, 7'(t.m)}, errors);
+    check_page(tag, 3, {t.k == Tk, 7'd0}, errors);
     check_page(tag, 4, 8'(wxor), errors);
     // One input row and one output row per activation row per tile (wraps at 256)
     check_page(tag, 5, 8'(rows), errors);
@@ -556,13 +569,17 @@ task automatic run_directed_tests(input test_t tests[$]);
     test_t  t_a = tests[0], t_b = tests[0], t_long, t_tile, t_tile_big;
     bit     has_long = 0, has_tile = 0, has_tile_big = 0;
     test_t  t_sat = tests[0];
+    // Shapes are relative to the array size (gen_golden.py --array-dim). For the 4x4 array these are
+    // tile_M8_K8_N8_full (2x2x2 tiles) and tile_M36_K12_N8_med
+    string  tile_name     = $sformatf("tile_M%0d_K%0d_N%0d_full", 2*Tm, 2*Tk, 2*Tn);
+    string  tile_big_name = $sformatf("tile_M%0d_K%0d_N%0d_med", (9*Tm <= MAX_ROW) ? 9*Tm : MAX_ROW - Tm, 3*Tk, 2*Tn);
 
     foreach (tests[i]) begin
         if (tests[i].name == "rand_small_0")           t_a = tests[i];
         if (tests[i].name == "rand_full_0")            t_b = tests[i];
         if (tests[i].name == "stream_M64_full")        begin t_long     = tests[i]; has_long     = 1; end
-        if (tests[i].name == "tile_M8_K8_N8_full")     begin t_tile     = tests[i]; has_tile     = 1; end
-        if (tests[i].name == "tile_M36_K12_N8_med")    begin t_tile_big = tests[i]; has_tile_big = 1; end
+        if (tests[i].name == tile_name)                begin t_tile     = tests[i]; has_tile     = 1; end
+        if (tests[i].name == tile_big_name)            begin t_tile_big = tests[i]; has_tile_big = 1; end
         if (tests[i].name == "psum_sat16_pos")         t_sat = tests[i];
     end
 
@@ -619,7 +636,7 @@ task automatic run_directed_tests(input test_t tests[$]);
                         .p_off(O_SIZE - t_tile_big.m * (t_tile_big.n / Tn)), .label("tiled_offsets_at_top_of_memory"));
 
     // Reset in every cycle of a run (single tile, then a run with several K and N tiles so the
-    // reset also lands in the DRAIN -> LOAD_WEIGHT tile transitions)
+    // reset also lands in GAP and while one tile drains as the next one loads weights)
     reset_sweep(t_a);
     if (has_tile) reset_sweep(t_tile);
 

@@ -6,10 +6,10 @@
 
      Used for saturating output to 8 bits and partial sums to 16 bits
 
-     OUTPUT_WIDTH must be greater than or equal to INPUT_WIDTH
+     INPUT_WIDTH must be greater than or equal to OUTPUT_WIDTH
 *******************************************************************************/
 
-module saturate 
+module saturate_9
     #(
         parameter   INPUT_WIDTH=18,
         parameter   OUTPUT_WIDTH=16

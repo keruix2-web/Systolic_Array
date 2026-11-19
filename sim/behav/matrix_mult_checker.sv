@@ -1,1 +1,0 @@
-../../src/verilog/verif/checkers/matrix_mult_checker.sv

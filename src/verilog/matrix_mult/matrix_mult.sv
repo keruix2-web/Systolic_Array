@@ -53,14 +53,32 @@ module matrix_mult_9 #(
     output extra_output_bits_struct       extra_output_bits_o     
     );
 
+    // Check that the parameters agree with each other and with matrix_mult_pkg when the array size or
+    // data width is changed (ROW, COL and WIDTH in the package, and these defaults and the wrapper's)
+    // synopsys translate_off
+    initial begin
+        if (ARRAY_ACCUM_WIDTH < 2*WIDTH + $clog2(Tk))
+            $fatal(1, "matrix_mult_9: ARRAY_ACCUM_WIDTH=%0d is too narrow for a %0d-row array of %0d-bit inputs (needs %0d)",
+                   ARRAY_ACCUM_WIDTH, Tk, WIDTH, 2*WIDTH + $clog2(Tk));
+        if (Tm != Tk || Tk != ROW || Tn != COL || WIDTH != matrix_mult_pkg::WIDTH)
+            $fatal(1, "matrix_mult_9: Tm=%0d Tk=%0d Tn=%0d WIDTH=%0d do not match matrix_mult_pkg ROW=%0d COL=%0d WIDTH=%0d",
+                   Tm, Tk, Tn, WIDTH, ROW, COL, matrix_mult_pkg::WIDTH);
+    end
+    // synopsys translate_on
+
     // Wires to connect controller and systolic array
     logic load_weight_w, write_weight_w, act_valid_w, psum_valid_w, psum_valid_delayed_w;
     logic first_k_w, last_k_w;
 
+    // The accumulate sum needs one more bit than the wider of the array output and the partial sum memory
+    // (19 bits for the 4x4 array: 18-bit array output + 16-bit partial sum)
+    localparam SUM_WIDTH = ((ARRAY_ACCUM_WIDTH > ACCUM_WIDTH) ? ARRAY_ACCUM_WIDTH : ACCUM_WIDTH) + 1;
+
     // Wires to buffer and saturate partial sum output 
     logic [Tn-1:0][ARRAY_ACCUM_WIDTH-1:0] array_psum_sys_w;
     logic [Tn-1:0][ARRAY_ACCUM_WIDTH-1:0] array_psum_buff_w;
-    logic [Tn-1:0][ARRAY_ACCUM_WIDTH:0] array_psum_added_w;
+    logic [Tn-1:0][ARRAY_ACCUM_WIDTH-1:0] array_psum_ext_w;
+    logic [Tn-1:0][SUM_WIDTH-1:0] array_psum_added_w;
 
     // Create wires for each saturation precision
     logic [Tn-1:0][ACCUM_WIDTH-1:0] array_psum_sat_16_w;
@@ -107,7 +125,7 @@ module matrix_mult_9 #(
     assign ob_mem_wenb_W_o = ext_en_i ? 1'b1 : mem_ob_W_wenb;
     assign ob_mem_addr_W_o = ext_en_i ? '0 : mem_ob_W_addr;
 
-    external_controller #(.Tk(Tk)) u_external_controller (
+    external_controller_9 #(.Tk(Tk)) u_external_controller (
         .clk_i, .rstn_i, .ext_en_i,
         .ext_weight_en_i(ext_inputs_i.ext_weight_en),
         .ext_valid_i(ext_inputs_i.ext_valid),
@@ -122,7 +140,7 @@ module matrix_mult_9 #(
     assign array_activation = ext_en_i ? ext_inputs_i.ext_input : ib_mem_data_i;
 
     // Instantiate the controller
-    controller
+    controller_9
     #(
         .Tn         (Tn),
         .Tk         (Tk),
@@ -159,7 +177,7 @@ module matrix_mult_9 #(
     );
 
     // Instantiate the systolic array of the proper size
-    systolic_array #(
+    systolic_array_9 #(
         .INPUT_WIDTH    (WIDTH), 
         .ARRAY_W        (Tn), 
         .ARRAY_H        (Tk), 
@@ -179,14 +197,17 @@ module matrix_mult_9 #(
 
     // Buffer the psum generated from the array because it needs to be added with partial sum read from
     // memory which won't be ready until next cycle
+    // Only capture valid memory mode rows. This clock gates the buffer and holds the adder and
+    // saturator inputs steady when there is nothing to write
     generate
         for(genvar j=0; j < Tn; j++) begin : psum_buffer
-            shift_buffer #(
+            shift_buffer_9 #(
                 .DATA_WIDTH     (ARRAY_ACCUM_WIDTH),
                 .BUFFER_LENGTH  (1)
             ) psum_buff (
                 .clk_i      (clk_i),
                 .rstn_i     (rstn_i),
+                .en_i       (psum_valid_w && !ext_en_i),
                 .data_i     (array_psum_sys_w[j]),
                 .data_o     (array_psum_buff_w[j])
             );
@@ -197,15 +218,16 @@ module matrix_mult_9 #(
     // If this is the first k tile, add the partial sum to 0
     generate
         for(genvar j=0; j < Tn; j++) begin : psum_addition
-            assign array_psum_added_w[j] = first_k_w ? {array_psum_buff_w[j][ARRAY_ACCUM_WIDTH-1], array_psum_buff_w[j]} : {array_psum_buff_w[j][ARRAY_ACCUM_WIDTH-1], array_psum_buff_w[j][ARRAY_ACCUM_WIDTH-1:0]} + {{(ARRAY_ACCUM_WIDTH-ACCUM_WIDTH+1){ob_mem_data_R_i[j][ACCUM_WIDTH-1]}}, ob_mem_data_R_i[j][ACCUM_WIDTH-1:0]};
+            // Sign extend both values to SUM_WIDTH with a signed size cast (works for any widths)
+            assign array_psum_added_w[j] = first_k_w ? SUM_WIDTH'($signed(array_psum_buff_w[j])) : SUM_WIDTH'($signed(array_psum_buff_w[j])) + SUM_WIDTH'($signed(ob_mem_data_R_i[j]));
         end
     endgenerate
 
     // Saturate the summed partial sum to 16 bits and 8 bits in parallel and choose which to write back to memory
     generate
         for(genvar j=0; j < Tn; j++) begin : output_saturation
-            saturate #(
-                .INPUT_WIDTH    (ARRAY_ACCUM_WIDTH+1),
+            saturate_9 #(
+                .INPUT_WIDTH    (SUM_WIDTH),
                 .OUTPUT_WIDTH   (ACCUM_WIDTH)
             ) psum_sat (
                 .data_i (array_psum_added_w[j]),
@@ -213,8 +235,8 @@ module matrix_mult_9 #(
                 .sat_o  (array_sat_16_psum_added_w[j])
             );
     
-            saturate #(
-                .INPUT_WIDTH  (ARRAY_ACCUM_WIDTH+1),
+            saturate_9 #(
+                .INPUT_WIDTH  (SUM_WIDTH),
                 .OUTPUT_WIDTH (WIDTH)
             ) output_sat (
                 .data_i (array_psum_added_w[j]),
@@ -228,18 +250,22 @@ module matrix_mult_9 #(
     // otherwise keep the 16-bit precision for intermediate partial sums
     generate
         for(genvar j=0; j < Tn; j++) begin : output_select
-            assign ob_mem_data_W_o[j] = last_k_w ? {{(ACCUM_WIDTH-WIDTH){array_psum_sat_8_w[j][WIDTH-1]}}, array_psum_sat_8_w[j]} : array_psum_sat_16_w[j];
+            // A signed size cast sign extends the 8-bit result (and still works when WIDTH == ACCUM_WIDTH)
+            assign ob_mem_data_W_o[j] = last_k_w ? ACCUM_WIDTH'($signed(array_psum_sat_8_w[j])) : array_psum_sat_16_w[j];
         end
     endgenerate
 
     // Independent external saturation preserves Tk+Tn-1 latency and avoids
     // feeding unavailable psum-memory data into external/BiST arithmetic.
+    // Its result is only used in external mode, so hold its input at 0 in memory mode (operand isolation)
+    assign array_psum_ext_w = ext_en_i ? array_psum_sys_w : '0;
+
     for (genvar j=0; j<Tn; j++) begin : external_saturation
-        saturate #(
+        saturate_9 #(
             .INPUT_WIDTH    (ARRAY_ACCUM_WIDTH), 
             .OUTPUT_WIDTH   (WIDTH)
             ) ext_sat (
-            .data_i (array_psum_sys_w[j]), 
+            .data_i (array_psum_ext_w[j]), 
             .data_o (external_result[j]),
             .sat_o  (array_sat_psum_sys_w[j])
         );
@@ -256,7 +282,7 @@ module matrix_mult_9 #(
     assign sat_psum_sys_or_w = | array_sat_psum_sys_w;
 
     // Instantiate the debug mux
-    debug_obs
+    debug_obs_9
     #(
         .WIDTH  (WIDTH),
         .Tn     (Tn),

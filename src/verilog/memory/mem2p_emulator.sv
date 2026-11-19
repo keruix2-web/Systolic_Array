@@ -1,5 +1,5 @@
 `timescale 1ns/1ps
-module mem2p_emulator #(parameter WIDTH=32, SIZE=256) (
+module mem2p_emulator_9 #(parameter WIDTH=32, SIZE=256) (
 	input  logic                    clk_i,
 
 	// Port A

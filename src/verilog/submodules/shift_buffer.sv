@@ -9,9 +9,13 @@
      be completed a full row at a time
 
      When BUFFER_LENGTH=0, input is directly connected to output
+
+     en_i is the clock enable for the whole buffer. It must be high on every
+     cycle valid data is entering or inside the buffer. When it is low the
+     buffer holds, so synthesis can replace the enable with a clock gate
 *******************************************************************************/
 
-module shift_buffer
+module shift_buffer_9
     #(
         parameter DATA_WIDTH=8,     // Set to 16 for outputs because of partial sums
         parameter BUFFER_LENGTH=4
@@ -19,6 +23,7 @@ module shift_buffer
     (
         input logic                         clk_i,
         input logic                         rstn_i,
+        input logic                         en_i,
         input logic     [DATA_WIDTH-1:0]    data_i,
         output logic    [DATA_WIDTH-1:0]    data_o
     );
@@ -33,11 +38,11 @@ module shift_buffer
             // Internal array to hold data in the buffer
             logic [BUFFER_LENGTH-1:0][DATA_WIDTH-1:0] stored_data;
 
-            // On every clock cycle, advance the data through the buffer
+            // On every enabled clock cycle, advance the data through the buffer
             always_ff @(posedge clk_i) begin
                 if(!rstn_i) begin
                     stored_data <= '0;
-                end else begin
+                end else if(en_i) begin
                     // Shift the elements in the data array to advance one slot
                     stored_data <= stored_data << DATA_WIDTH;
                     // Override the lowest elements in the array to the new input data

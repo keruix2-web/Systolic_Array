@@ -103,7 +103,7 @@ module tb_matrix_mult_gate;
    end
 
    // -- Memory Instance: Input Buffer Memory -- //
-   mem_emulator #(.WIDTH(Tm*WIDTH), .SIZE(I_SIZE))
+   mem_emulator_9 #(.WIDTH(Tm*WIDTH), .SIZE(I_SIZE))
       ib_mem (
          .clk_i   (clk_i),
          .cenb_i  (ib_mem_cenb_o),
@@ -114,7 +114,7 @@ module tb_matrix_mult_gate;
    );
 
    // -- Memory Instance: Weight Buffer Memory -- //
-   mem_emulator #(.WIDTH(Tn*WIDTH), .SIZE(W_SIZE))
+   mem_emulator_9 #(.WIDTH(Tn*WIDTH), .SIZE(W_SIZE))
       wb_mem (
          .clk_i   (clk_i),
          .cenb_i  (wb_mem_cenb_o),
@@ -125,7 +125,7 @@ module tb_matrix_mult_gate;
    );
 
    // -- Memory Instance: Output Buffer Memory -- //
-   mem2p_emulator #(.WIDTH(Tn*ACCUM_WIDTH), .SIZE(O_SIZE))
+   mem2p_emulator_9 #(.WIDTH(Tn*ACCUM_WIDTH), .SIZE(O_SIZE))
       ob_mem (
          .clk_i    (clk_i),
          .cenb_a_i (ob_mem_cenb_R_o),

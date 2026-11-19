@@ -124,7 +124,7 @@ module matrix_mult_checker
     assign n_tiles = data_config_i.w_cols / Tn;
     assign tiles   = k_tiles * n_tiles;
 
-    // Each tile is LOAD_WEIGHT (Tk) + STREAM (i_rows) + DRAIN (array latency + write, under Tm + Tn + 4)
+    // Each tile is at most LOAD_WEIGHT (Tk) + STREAM (i_rows) + drain (array latency + write, under Tm + Tn + 4)
     int unsigned max_latency;
     assign max_latency = tiles * (Tk + m_rows + Tm + Tn + 4) + 8;
 
@@ -189,12 +189,14 @@ module matrix_mult_checker
     a_done_clears_on_start: assert property (done_o && start_rise |=> !done_o)
         else `SVA_FAIL("done_o stayed high after a new start edge")
 
-    a_done_needs_run: assert property ($rose(done_o) |-> busy)
+    // done_o is already high out of reset (IDLE). It also rises when ext_en_i drops, because
+    // done_o is masked in external mode. Any other rise must end a run.
+    a_done_needs_run: assert property ($rose(done_o) && !$past(ext_en_i) |-> busy)
         else `SVA_FAIL("done_o rose without a start edge")
 
     // Every tile reads Tk weight words and i_rows activation words and writes i_rows output words.
     // Partial sums are read back on every K tile after the first.
-    a_done_counts: assert property ($rose(done_o) |-> n_writes   == tiles * m_rows
+    a_done_counts: assert property ($rose(done_o) && busy |-> n_writes   == tiles * m_rows
                                                    && n_ib_reads == tiles * m_rows
                                                    && n_wb_reads == tiles * Tk
                                                    && n_ob_reads == (k_tiles - 1) * n_tiles * m_rows)

@@ -210,12 +210,13 @@ module matrix_mult_wrapper_9 #(
   logic bist_stop_source, bypass_stop, array_stop;
   assign bist_stop_source = ext_en_i && !driver_bypass_w &&
                             !driver_mode_w && driver_done_w;
-  shift_buffer #(.DATA_WIDTH(1), .BUFFER_LENGTH(1)) u_bypass_stop (
-      .clk_i(g_clk), .rstn_i(rstn_i),
+  // Stop delays are single-bit control, so they stay ungated (en_i tied high)
+  shift_buffer_9 #(.DATA_WIDTH(1), .BUFFER_LENGTH(1)) u_bypass_stop (
+      .clk_i(g_clk), .rstn_i(rstn_i), .en_i(1'b1),
       .data_i(bist_stop_source), .data_o(bypass_stop)
   );
-  shift_buffer #(.DATA_WIDTH(1), .BUFFER_LENGTH(ARRAY_LATENCY+1)) u_array_stop (
-      .clk_i(g_clk), .rstn_i(rstn_i),
+  shift_buffer_9 #(.DATA_WIDTH(1), .BUFFER_LENGTH(ARRAY_LATENCY+1)) u_array_stop (
+      .clk_i(g_clk), .rstn_i(rstn_i), .en_i(1'b1),
       .data_i(bist_stop_source), .data_o(array_stop)
   );
   assign sa_stop_w = dut_bypass_w ? bypass_stop : array_stop;

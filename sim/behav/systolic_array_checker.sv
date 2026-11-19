@@ -1,1 +1,0 @@
-../../src/verilog/verif/checkers/systolic_array_checker.sv
